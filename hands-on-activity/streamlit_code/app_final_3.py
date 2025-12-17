@@ -7,6 +7,10 @@ from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go  
 import plotly.express as px
+from umap import UMAP
+
+
+
 
 
 # Optional: ALS
@@ -20,13 +24,13 @@ except:
 # ------------------------
 # Load Data (once globally)
 # ------------------------
-original_df = pd.read_csv("hands-on-activity/streamlit_code/merged_movielens.csv")
+original_df = pd.read_csv("merged_movielens.csv")
 
-merged_df = pd.read_csv("hands-on-activity/streamlit_code/movielens_100k_categories.csv")
+merged_df = pd.read_csv("movielens_100k_categories.csv")
 merged_df.columns = merged_df.columns.str.strip()
 
 user_cols = ["userId", "age", "gender", "occupation", "zip_code"]
-users = pd.read_csv("hands-on-activity/data/ml-100k/u.user", sep="|", names=user_cols, encoding="latin-1")
+users = pd.read_csv("../data/ml-100k/u.user", sep="|", names=user_cols, encoding="latin-1")
 users = users.drop(columns=["zip_code"])
 users.columns = users.columns.str.strip()
 
@@ -1031,88 +1035,203 @@ with tab3:
         else:
             st.warning("No 'neutral' movies available in this subset to perform recovery.")
 
-    # ------------------------
-    # 3D Latent Space plot (user-centered)
-    # ------------------------
-    st.subheader("3D Latent Space – User-Centered")
-    if k < 3:
-        st.warning("Need at least 3 latent factors for 3D visualization.")
-    else:
-        import plotly.graph_objects as go
-        movie_coords = V_scaled[:, :3] if k >= 3 else np.hstack([V_scaled, np.zeros((n_movies, 3 - k))])
-        movie_df = pd.DataFrame(movie_coords, columns=["dim1", "dim2", "dim3"])
-        movie_df["movieId"] = all_movie_ids
-        movie_df = movie_df.merge(movie_info_safe[["movieId", "title", "category"]], on="movieId", how="left")
+    col1,col2 = st.columns(2)
 
-        # center on current user position
-        user_center = st.session_state.user_latent_current[:3]
-        movie_df[["dim1", "dim2", "dim3"]] = movie_df[["dim1", "dim2", "dim3"]].values - user_center
+    with col1: 
 
-        # top10 subset (preserve order)
-        top10_ids = top10["movieId"].tolist()
-        top10_plot = movie_df[movie_df["movieId"].isin(top10_ids)].copy()
-        top10_plot["order"] = top10_plot["movieId"].map({m: i for i, m in enumerate(top10_ids)})
-        top10_plot = top10_plot.sort_values("order")
+        # ------------------------
+        # 3D Latent Space plot (user-centered)
+        # ------------------------
+        st.subheader("3D Latent Space – User-Centered")
+        if k < 3:
+            st.warning("Need at least 3 latent factors for 3D visualization.")
+        else:
+            movie_coords = V_scaled[:, :3] if k >= 3 else np.hstack([V_scaled, np.zeros((n_movies, 3 - k))])
+            movie_df = pd.DataFrame(movie_coords, columns=["dim1", "dim2", "dim3"])
+            movie_df["movieId"] = all_movie_ids
+            movie_df = movie_df.merge(movie_info_safe[["movieId", "title", "category"]], on="movieId", how="left")
 
-        fig = go.Figure()
-        # clusters by category
-        for cat, color in category_colors.items():
-            subset = movie_df[movie_df["category"] == cat]
-            if not subset.empty:
+            # center on current user position
+            user_center = st.session_state.user_latent_current[:3]
+            movie_df[["dim1", "dim2", "dim3"]] = movie_df[["dim1", "dim2", "dim3"]].values - user_center
+
+            # top10 subset (preserve order)
+            top10_ids = top10["movieId"].tolist()
+            top10_plot = movie_df[movie_df["movieId"].isin(top10_ids)].copy()
+            top10_plot["order"] = top10_plot["movieId"].map({m: i for i, m in enumerate(top10_ids)})
+            top10_plot = top10_plot.sort_values("order")
+
+            fig = go.Figure()
+            # clusters by category
+            for cat, color in category_colors.items():
+                subset = movie_df[movie_df["category"] == cat]
+                if not subset.empty:
+                    fig.add_trace(go.Scatter3d(
+                        x=subset["dim1"], y=subset["dim2"], z=subset["dim3"],
+                        mode='markers', name=f"{cat.capitalize()}",
+                        marker=dict(size=5, color=color, opacity=0.6),
+                        text=subset["title"]
+                    ))
+
+            # top10 diamonds
+            if not top10_plot.empty:
                 fig.add_trace(go.Scatter3d(
-                    x=subset["dim1"], y=subset["dim2"], z=subset["dim3"],
-                    mode='markers', name=f"{cat.capitalize()}",
-                    marker=dict(size=5, color=color, opacity=0.6),
-                    text=subset["title"]
+                    x=top10_plot["dim1"], y=top10_plot["dim2"], z=top10_plot["dim3"],
+                    mode='markers+text', name="Top-10 (recommendations)",
+                    marker=dict(size=9, color=[category_colors.get(c, "gray") for c in top10_plot["category"]],
+                                symbol="diamond", opacity=1),
+                    text=top10_plot["title"], textposition="top center"
                 ))
 
-        # top10 diamonds
-        if not top10_plot.empty:
+            # trajectory (pad/truncate to k, then take first 3 dims and center by user_center)
+            trajectory_arr = np.array(st.session_state.trajectory)
+            if trajectory_arr.ndim == 1:
+                trajectory_arr = trajectory_arr.reshape(1, -1)
+            # pad/truncate columns to k
+            traj_k = trajectory_arr.shape[1]
+            if traj_k < k:
+                trajectory_arr = np.hstack([trajectory_arr, np.tile(V_mean, (trajectory_arr.shape[0], k - traj_k))])
+            elif traj_k > k:
+                trajectory_arr = trajectory_arr[:, :k]
+            traj3 = trajectory_arr[:, :3] - user_center
+            if traj3.shape[0] > 0:
+                fig.add_trace(go.Scatter3d(
+                    x=traj3[:, 0], y=traj3[:, 1], z=traj3[:, 2],
+                    mode="lines+markers+text", name="User Trajectory",
+                    line=dict(color="blue", width=4),
+                    marker=dict(size=6, color="blue"),
+                    text=[f"Step {i}" for i in range(traj3.shape[0])],
+                    textposition="bottom center"
+                ))
+
+            # current user
+            cur = traj3[-1]
             fig.add_trace(go.Scatter3d(
-                x=top10_plot["dim1"], y=top10_plot["dim2"], z=top10_plot["dim3"],
-                mode='markers+text', name="Top-10 (recommendations)",
-                marker=dict(size=9, color=[category_colors.get(c, "gray") for c in top10_plot["category"]],
-                            symbol="diamond", opacity=1),
-                text=top10_plot["title"], textposition="top center"
+                x=[cur[0]], y=[cur[1]], z=[cur[2]],
+                mode="markers+text", name=f"User {selected_user}",
+                marker=dict(size=10, color="blue", symbol="circle"),
+                text=[f"User {selected_user}"],
+                textposition="top center"
             ))
 
-        # trajectory (pad/truncate to k, then take first 3 dims and center by user_center)
-        trajectory_arr = np.array(st.session_state.trajectory)
-        if trajectory_arr.ndim == 1:
-            trajectory_arr = trajectory_arr.reshape(1, -1)
-        # pad/truncate columns to k
-        traj_k = trajectory_arr.shape[1]
-        if traj_k < k:
-            trajectory_arr = np.hstack([trajectory_arr, np.tile(V_mean, (trajectory_arr.shape[0], k - traj_k))])
-        elif traj_k > k:
-            trajectory_arr = trajectory_arr[:, :k]
-        traj3 = trajectory_arr[:, :3] - user_center
-        if traj3.shape[0] > 0:
-            fig.add_trace(go.Scatter3d(
-                x=traj3[:, 0], y=traj3[:, 1], z=traj3[:, 2],
-                mode="lines+markers+text", name="User Trajectory",
-                line=dict(color="blue", width=4),
-                marker=dict(size=6, color="blue"),
-                text=[f"Step {i}" for i in range(traj3.shape[0])],
-                textposition="bottom center"
+            fig.update_layout(
+                title=f"3D Latent Space – {method} (k={k}) [User-Centered]",
+                scene=dict(xaxis_title="Latent Dim 1", yaxis_title="Latent Dim 2", zaxis_title="Latent Dim 3"),
+                height=750, legend=dict(x=0.02, y=0.98)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    with col2: 
+        # ------------------------
+        # Enhanced UMAP projection (fit once per method,n_movies,k and reuse)
+        # ------------------------
+        try:
+            umap_key = f"umap_{method}_{n_movies}_{k}"
+            # We'll store model and V_mean (for padding) in session_state so transforms remain consistent
+            if umap_key not in st.session_state:
+                # build input for UMAP: center by V_mean then normalize rows to unit length
+                V_center = V_scaled - V_mean
+                row_norms = np.linalg.norm(V_center, axis=1, keepdims=True)
+                V_umap_input = V_center / (row_norms + 1e-9)
+
+                umap_model = UMAP(n_components=3, random_state=42, metric="cosine")
+                movie_coords_umap = umap_model.fit_transform(V_umap_input)
+
+                st.session_state[umap_key] = {
+                    "model": umap_model,
+                    "V_mean": V_mean,
+                    "row_norms": row_norms  # helpful if needed for consistent transform
+                }
+            else:
+                umap_model = st.session_state[umap_key]["model"]
+                # ensure V_mean used when padding trajectory
+                V_mean_stored = st.session_state[umap_key].get("V_mean", V_mean)
+
+                # prepare V_umap_input same way (center & normalize)
+                V_center = V_scaled - V_mean_stored
+                row_norms = np.linalg.norm(V_center, axis=1, keepdims=True)
+                V_umap_input = V_center / (row_norms + 1e-9)
+                movie_coords_umap = umap_model.transform(V_umap_input)
+
+            # movie UMAP dataframe (movie order aligned to R_full.columns)
+            movie_umap_df = pd.DataFrame(movie_coords_umap, columns=["dim1", "dim2", "dim3"])
+            movie_umap_df["movieId"] = all_movie_ids
+            movie_umap_df = movie_umap_df.merge(movie_info_safe[["movieId", "title", "category"]], on="movieId", how="left")
+
+            # Transform entire stored trajectory consistently: center by same V_mean then normalize rows
+            trajectory_arr = np.array(st.session_state.trajectory)
+            if trajectory_arr.ndim == 1:
+                trajectory_arr = trajectory_arr.reshape(1, -1)
+            # pad/truncate to k
+            traj_k = trajectory_arr.shape[1]
+            if traj_k < k:
+                trajectory_arr = np.hstack([trajectory_arr, np.tile(V_mean, (trajectory_arr.shape[0], k - traj_k))])
+            elif traj_k > k:
+                trajectory_arr = trajectory_arr[:, :k]
+
+            # center using stored V_mean (if available)
+            V_mean_for_traj = st.session_state[umap_key].get("V_mean", V_mean)
+            traj_center = trajectory_arr - V_mean_for_traj
+            traj_norms = np.linalg.norm(traj_center, axis=1, keepdims=True)
+            traj_umap_input = traj_center / (traj_norms + 1e-9)
+
+            user_umap_coords = st.session_state[umap_key]["model"].transform(traj_umap_input)
+            user_umap_df = pd.DataFrame(user_umap_coords, columns=["dim1", "dim2", "dim3"])
+            user_umap_df["step"] = np.arange(len(user_umap_df))
+
+            # plotting UMAP
+            fig_umap = go.Figure()
+            for cat, color in category_colors.items():
+                subset = movie_umap_df[movie_umap_df["category"] == cat]
+                if not subset.empty:
+                    fig_umap.add_trace(go.Scatter3d(
+                        x=subset["dim1"], y=subset["dim2"], z=subset["dim3"],
+                        mode='markers', name=f"{cat.capitalize()} Movies",
+                        marker=dict(size=5, color=color, opacity=0.6),
+                        text=subset["title"]
+                    ))
+
+            if len(user_umap_df) > 1:
+                fig_umap.add_trace(go.Scatter3d(
+                    x=user_umap_df["dim1"], y=user_umap_df["dim2"], z=user_umap_df["dim3"],
+                    mode="lines+markers+text", name="User Trajectory (UMAP)",
+                    line=dict(color="blue", width=4),
+                    marker=dict(size=6, color="blue"),
+                    text=[f"Step {i}" for i in user_umap_df["step"]],
+                    textposition="bottom center"
+                ))
+
+            # current user
+            cur = user_umap_df.iloc[-1]
+            fig_umap.add_trace(go.Scatter3d(
+                x=[cur["dim1"]], y=[cur["dim2"]], z=[cur["dim3"]],
+                mode="markers+text", name="Current User Position",
+                marker=dict(size=10, color="blue", symbol="circle"),
+                text=[f"User {selected_user}"], textposition="top center"
             ))
 
-        # current user
-        cur = traj3[-1]
-        fig.add_trace(go.Scatter3d(
-            x=[cur[0]], y=[cur[1]], z=[cur[2]],
-            mode="markers+text", name=f"User {selected_user}",
-            marker=dict(size=10, color="blue", symbol="circle"),
-            text=[f"User {selected_user}"],
-            textposition="top center"
-        ))
+            # top10 context
+            top10_umap = movie_umap_df[movie_umap_df["movieId"].isin(top10["movieId"])].copy()
+            if not top10_umap.empty:
+                fig_umap.add_trace(go.Scatter3d(
+                    x=top10_umap["dim1"], y=top10_umap["dim2"], z=top10_umap["dim3"],
+                    mode="markers+text", name="Top-10 (UMAP)",
+                    marker=dict(size=9, color=[category_colors.get(c, "gray") for c in top10_umap["category"]],
+                                symbol="diamond", opacity=1),
+                    text=top10_umap["title"], textposition="top center"
+                ))
 
-        fig.update_layout(
-            title=f"3D Latent Space – {method} (k={k}) [User-Centered]",
-            scene=dict(xaxis_title="Latent Dim 1", yaxis_title="Latent Dim 2", zaxis_title="Latent Dim 3"),
-            height=750, legend=dict(x=0.02, y=0.98)
-        )
-        st.plotly_chart(fig, use_container_width=True)
+            fig_umap.update_layout(
+                title="Enhanced UMAP Projection (Cosine distance): Content Clusters + User Drift",
+                scene=dict(xaxis_title="UMAP Dim 1", yaxis_title="UMAP Dim 2", zaxis_title="UMAP Dim 3"),
+                height=750, legend=dict(x=0.02, y=0.98)
+            )
+            st.plotly_chart(fig_umap, use_container_width=True)
+
+        except Exception as e:
+            st.warning(f"UMAP projection skipped: {e}")
+
+
 
     # ------------------------
     # Radicalization Index (top10-based)
@@ -1125,7 +1244,6 @@ with tab3:
     # ------------------------
     # Category distribution chart
     # ------------------------
-    import plotly.express as px
     cat_counts = top10["category"].value_counts().reindex(["neutral", "mildly_political", "extreme"], fill_value=0)
     cat_chart = px.bar(
         x=cat_counts.index, y=cat_counts.values,
@@ -1136,116 +1254,183 @@ with tab3:
     )
     st.plotly_chart(cat_chart, use_container_width=True)
 
-    # ------------------------
-    # Enhanced UMAP projection (fit once per method,n_movies,k and reuse)
-    # ------------------------
+    
+
+    import numpy as np
+    import numpy as np
+    import networkx as nx
+    import plotly.graph_objects as go
+    from sklearn.metrics.pairwise import cosine_similarity
+
+    st.subheader("Category-Biased KNN Graph (Top-10 Highlight + Exaggerated User Drift)")
+
     try:
-        from umap import UMAP
-        umap_key = f"umap_{method}_{n_movies}_{k}"
-        # We'll store model and V_mean (for padding) in session_state so transforms remain consistent
-        if umap_key not in st.session_state:
-            # build input for UMAP: center by V_mean then normalize rows to unit length
-            V_center = V_scaled - V_mean
-            row_norms = np.linalg.norm(V_center, axis=1, keepdims=True)
-            V_umap_input = V_center / (row_norms + 1e-9)
+        # -------------------------------
+        # 1. Prepare UMAP coordinates
+        # -------------------------------
+        X = movie_umap_df[["dim1", "dim2", "dim3"]].values
+        categories = movie_umap_df["category"].values
+        titles = movie_umap_df["title"].values
+        movie_ids = movie_umap_df["movieId"].values
 
-            umap_model = UMAP(n_components=3, random_state=42, metric="cosine")
-            movie_coords_umap = umap_model.fit_transform(V_umap_input)
+        # -------------------------------
+        # 2. Compute cosine similarity
+        # -------------------------------
+        S = cosine_similarity(X)
 
-            st.session_state[umap_key] = {
-                "model": umap_model,
-                "V_mean": V_mean,
-                "row_norms": row_norms  # helpful if needed for consistent transform
-            }
+        # -------------------------------
+        # 3. Apply category bias (visual only)
+        # -------------------------------
+        bias_strength = 1.2
+        S_biased = S.copy()
+        for i in range(len(S)):
+            for j in range(len(S)):
+                if categories[i] == categories[j]:
+                    S_biased[i, j] *= bias_strength
+
+        # -------------------------------
+        # 4. Build KNN graph
+        # -------------------------------
+        K = 6
+        neighbors = np.argsort(-S_biased, axis=1)[:, :K]
+
+        G = nx.Graph()
+        for i in range(len(S)):
+            for j in neighbors[i]:
+                G.add_edge(i, j, weight=S_biased[i, j])
+
+        # -------------------------------
+        # 5. Graph layout (3D Spring)
+        # -------------------------------
+        pos = nx.spring_layout(G, dim=3, weight="weight", seed=42, scale=5.0, k=0.3)
+        graph_xyz = np.array([pos[i] for i in range(len(pos))])
+
+        # -------------------------------
+        # 6. Safe trajectory exaggeration toward clicked movies/clusters
+        # -------------------------------
+        user_traj = user_umap_df[["dim1","dim2","dim3"]].values
+        traj_start = user_traj[0]
+
+        # Determine target location: last Top-10 movie centroid
+        top10_ids = top10["movieId"].tolist()
+        top10_idx = np.where(np.isin(movie_ids, top10_ids))[0]
+        if len(top10_idx) > 0:
+            target_point = graph_xyz[top10_idx].mean(axis=0)
         else:
-            umap_model = st.session_state[umap_key]["model"]
-            # ensure V_mean used when padding trajectory
-            V_mean_stored = st.session_state[umap_key].get("V_mean", V_mean)
+            target_point = graph_xyz.mean(axis=0)
 
-            # prepare V_umap_input same way (center & normalize)
-            V_center = V_scaled - V_mean_stored
-            row_norms = np.linalg.norm(V_center, axis=1, keepdims=True)
-            V_umap_input = V_center / (row_norms + 1e-9)
-            movie_coords_umap = umap_model.transform(V_umap_input)
+        # 6a. Compute trajectory offsets and exaggerate
+        trajectory_exaggeration = 1.1  # moderate
+        traj_offsets = user_traj - traj_start
+        user_traj_scaled = traj_start + traj_offsets * trajectory_exaggeration
 
-        # movie UMAP dataframe (movie order aligned to R_full.columns)
-        movie_umap_df = pd.DataFrame(movie_coords_umap, columns=["dim1", "dim2", "dim3"])
-        movie_umap_df["movieId"] = all_movie_ids
-        movie_umap_df = movie_umap_df.merge(movie_info_safe[["movieId", "title", "category"]], on="movieId", how="left")
+        # -------------------------------
+        # 6b. Moderate directional drift toward target
+        # -------------------------------
+        direction_to_target = target_point - user_traj_scaled[-1]
+        drift_strength = 0.3  # small factor to move toward clicked movies/clusters
+        user_traj_scaled += np.linspace(0, 1, len(user_traj_scaled)).reshape(-1,1) * direction_to_target * drift_strength
+        
+        # 6c. Center trajectory near cluster center (optional)
+        cluster_center = graph_xyz.mean(axis=0)
+        user_traj_scaled += cluster_center - traj_start
 
-        # Transform entire stored trajectory consistently: center by same V_mean then normalize rows
-        trajectory_arr = np.array(st.session_state.trajectory)
-        if trajectory_arr.ndim == 1:
-            trajectory_arr = trajectory_arr.reshape(1, -1)
-        # pad/truncate to k
-        traj_k = trajectory_arr.shape[1]
-        if traj_k < k:
-            trajectory_arr = np.hstack([trajectory_arr, np.tile(V_mean, (trajectory_arr.shape[0], k - traj_k))])
-        elif traj_k > k:
-            trajectory_arr = trajectory_arr[:, :k]
+        # 6d. Put into DataFrame
+        user_umap_df_scaled = pd.DataFrame(user_traj_scaled, columns=["dim1","dim2","dim3"])
+        user_umap_df_scaled["step"] = user_umap_df["step"].values
 
-        # center using stored V_mean (if available)
-        V_mean_for_traj = st.session_state[umap_key].get("V_mean", V_mean)
-        traj_center = trajectory_arr - V_mean_for_traj
-        traj_norms = np.linalg.norm(traj_center, axis=1, keepdims=True)
-        traj_umap_input = traj_center / (traj_norms + 1e-9)
+        # -------------------------------
+        # 7. Plot: Category-Biased Layout
+        # -------------------------------
+        fig_knn = go.Figure()
 
-        user_umap_coords = st.session_state[umap_key]["model"].transform(traj_umap_input)
-        user_umap_df = pd.DataFrame(user_umap_coords, columns=["dim1", "dim2", "dim3"])
-        user_umap_df["step"] = np.arange(len(user_umap_df))
-
-        # plotting UMAP
-        import plotly.graph_objects as go
-        fig_umap = go.Figure()
+        # plot movies by category
         for cat, color in category_colors.items():
-            subset = movie_umap_df[movie_umap_df["category"] == cat]
-            if not subset.empty:
-                fig_umap.add_trace(go.Scatter3d(
-                    x=subset["dim1"], y=subset["dim2"], z=subset["dim3"],
-                    mode='markers', name=f"{cat.capitalize()} Movies",
-                    marker=dict(size=5, color=color, opacity=0.6),
-                    text=subset["title"]
+            idx = np.where(categories == cat)[0]
+            if len(idx) > 0:
+                fig_knn.add_trace(go.Scatter3d(
+                    x=graph_xyz[idx, 0],
+                    y=graph_xyz[idx, 1],
+                    z=graph_xyz[idx, 2],
+                    mode="markers",
+                    name=f"{cat.capitalize()}",
+                    marker=dict(size=6, opacity=0.75, color=color),
+                    text=titles[idx]
                 ))
 
-        if len(user_umap_df) > 1:
-            fig_umap.add_trace(go.Scatter3d(
-                x=user_umap_df["dim1"], y=user_umap_df["dim2"], z=user_umap_df["dim3"],
-                mode="lines+markers+text", name="User Trajectory (UMAP)",
-                line=dict(color="blue", width=4),
-                marker=dict(size=6, color="blue"),
-                text=[f"Step {i}" for i in user_umap_df["step"]],
+        # -------------------------------
+        # 8. Highlight Top-10 Recommendations
+        # -------------------------------
+        if len(top10_idx) > 0:
+            fig_knn.add_trace(go.Scatter3d(
+                x=graph_xyz[top10_idx, 0],
+                y=graph_xyz[top10_idx, 1],
+                z=graph_xyz[top10_idx, 2],
+                mode="markers+text",
+                name="Top-10 Recommendations",
+                marker=dict(
+                    size=14,
+                    symbol="diamond",
+                    opacity=1,
+                    color=[category_colors.get(categories[i], "gray") for i in top10_idx]
+                ),
+                text=[titles[i] for i in top10_idx],
+                textposition="top center"
+            ))
+
+        # -------------------------------
+        # 9. Overlay Exaggerated User Trajectory
+        # -------------------------------
+        if len(user_umap_df_scaled) > 1:
+            fig_knn.add_trace(go.Scatter3d(
+                x=user_umap_df_scaled["dim1"],
+                y=user_umap_df_scaled["dim2"],
+                z=user_umap_df_scaled["dim3"],
+                mode="lines+markers+text",
+                name="User Trajectory (Exaggerated)",
+                marker=dict(size=6, color="black"),
+                line=dict(width=4, color="black"),
+                text=[f"Step {s}" for s in user_umap_df_scaled["step"]],
                 textposition="bottom center"
             ))
 
         # current user
-        cur = user_umap_df.iloc[-1]
-        fig_umap.add_trace(go.Scatter3d(
-            x=[cur["dim1"]], y=[cur["dim2"]], z=[cur["dim3"]],
-            mode="markers+text", name="Current User Position",
-            marker=dict(size=10, color="blue", symbol="circle"),
-            text=[f"User {selected_user}"], textposition="top center"
+        cur = user_umap_df_scaled.iloc[-1]
+        fig_knn.add_trace(go.Scatter3d(
+            x=[cur["dim1"]],
+            y=[cur["dim2"]],
+            z=[cur["dim3"]],
+            mode="markers+text",
+            name="Current User",
+            marker=dict(size=12, color="black", symbol="circle"),
+            text=["User"],
+            textposition="top center"
         ))
 
-        # top10 context
-        top10_umap = movie_umap_df[movie_umap_df["movieId"].isin(top10["movieId"])].copy()
-        if not top10_umap.empty:
-            fig_umap.add_trace(go.Scatter3d(
-                x=top10_umap["dim1"], y=top10_umap["dim2"], z=top10_umap["dim3"],
-                mode="markers+text", name="Top-10 (UMAP)",
-                marker=dict(size=9, color=[category_colors.get(c, "gray") for c in top10_umap["category"]],
-                            symbol="diamond", opacity=1),
-                text=top10_umap["title"], textposition="top center"
-            ))
-
-        fig_umap.update_layout(
-            title="Enhanced UMAP Projection (Cosine distance): Content Clusters + User Drift",
-            scene=dict(xaxis_title="UMAP Dim 1", yaxis_title="UMAP Dim 2", zaxis_title="UMAP Dim 3"),
-            height=750, legend=dict(x=0.02, y=0.98)
+        # -------------------------------
+        # 10. Layout
+        # -------------------------------
+        fig_knn.update_layout(
+            title=(
+                "Category-Biased KNN Graph (Visualization Only)<br>"
+                "<sup>Clusters are visually enhanced — MF/UMAP embeddings unchanged. "
+                "User trajectory exaggerated toward clicked movies for demo clarity.</sup>"
+            ),
+            height=780,
+            scene=dict(
+                xaxis_title="Layout X",
+                yaxis_title="Layout Y",
+                zaxis_title="Layout Z"
+            ),
+            legend=dict(x=0.02, y=0.98),
         )
-        st.plotly_chart(fig_umap, use_container_width=True)
+
+        st.plotly_chart(fig_knn, use_container_width=True)
 
     except Exception as e:
-        st.warning(f"UMAP projection skipped: {e}")
+        st.warning(f"Category-biased graph skipped: {e}")
+
+
 
 
 

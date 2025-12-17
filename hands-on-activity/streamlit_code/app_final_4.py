@@ -138,7 +138,7 @@ V_pmf = None
 # ------------------------
 # Tabs
 # ------------------------
-tab1, tab2, tab3 = st.tabs(["Data", "Recommendations", "Simulation"])
+tab1, tab2, tab3, tab4 = st.tabs(["Data", "Recommendations", "Simulation", "Diversity Re-ranking"])
 
 # ------------------------
 # Tab 1: Data Display
@@ -359,7 +359,7 @@ with tab3:
     st.header(f"Latent Drift Simulation for User {selected_user} ({method})")
 
     # ------------------------
-    # 0. Compute latent drift (returns U_scaled, V_scaled, V_mean, movie_info_safe, pred_df, top10, k)
+    # 0. Compute latent drift
     # ------------------------
     drift_data = latent_drift_simulation(
         R_full, R_display, movie_info_reset,
@@ -376,7 +376,7 @@ with tab3:
     k = drift_data["k"]
 
     # ------------------------
-    # 1. Safe movie info defaults
+    # 1. Safe movie info
     # ------------------------
     movie_info_safe = movie_info_reset.copy()
     if "movieId" not in movie_info_safe.columns:
@@ -390,20 +390,17 @@ with tab3:
     # 2. Initialize user vector & trajectory
     # ------------------------
     if "user_latent_current" not in st.session_state or st.session_state.user_latent_current is None:
-        # safe fallback: if U_scaled smaller than expected, pad
-        st.session_state.user_latent_current = pad_truncate(U_scaled[user_idx, :].copy(), k)
-
+        st.session_state.user_latent_current = U_scaled[user_idx, :].copy()
     st.session_state.user_latent_current = pad_truncate(st.session_state.user_latent_current, k)
-
     if "trajectory" not in st.session_state or not st.session_state.trajectory:
         st.session_state.trajectory = [st.session_state.user_latent_current.copy()]
-
     current_user_vec = st.session_state.user_latent_current.copy()
 
     # ------------------------
-    # 3. Safe predictions (length aligned)
+    # 3. Safe predictions
     # ------------------------
-    pred_user_ratings = np.ravel(current_user_vec @ V_scaled.T)
+    pred_user_ratings = current_user_vec @ V_scaled.T
+    pred_user_ratings = np.ravel(pred_user_ratings)
     all_movie_ids = list(R_full.columns)
     if len(pred_user_ratings) != len(all_movie_ids):
         pad_val = np.nanmean(pred_user_ratings) if pred_user_ratings.size > 0 else 0.0
@@ -413,116 +410,78 @@ with tab3:
     rated_movies = R_display.loc[selected_user].dropna().index.tolist() if selected_user in R_display.index else []
     pred_df = pred_df[~pred_df["movieId"].isin(rated_movies)].reset_index(drop=True)
     top10 = pred_df.sort_values("pred_rating", ascending=False).head(10)
-    top10 = top10.merge(movie_info_safe[["movieId", "title", "category"]], on="movieId", how="left")
-    # ensure category exists
-    if "category" not in top10.columns:
-        top10["category"] = "neutral"
+    top10 = top10.merge(movie_info_safe[["movieId","title","category"]], on="movieId", how="left")
 
-    # ------------------------
-    # callback functions used by buttons (ALS-safe on_click)
-    # ------------------------
-    def _simulate_interaction_callback(movie_id: int, title: str, lr: float, k_local: int):
-        """
-        Update user latent current and trajectory in session state.
-        Must NOT call st.write or other Streamlit display functions here.
-        """
-        # guard: ensure user vector exists
-        if "user_latent_current" not in st.session_state or st.session_state.user_latent_current is None:
-            return
+    st.write("Top-10 for user:", top10)
+    st.write("Predicted ratings:", pred_user_ratings[:20])
+    st.write("Any NaNs?", np.isnan(pred_user_ratings).any())
+    st.write("All movie IDs:", all_movie_ids[:20])
 
-        # find movie index in stable all_movie_ids
-        try:
-            movie_idx_local = all_movie_ids.index(movie_id)
-        except ValueError:
-            st.session_state["_last_sim_failure"] = f"movie_id {movie_id} not found"
-            return
 
-        # update
-        before_vec = st.session_state.user_latent_current.copy()
-        st.session_state.user_latent_current += lr * (V_scaled[movie_idx_local, :] - st.session_state.user_latent_current)
-        st.session_state.user_latent_current = pad_truncate(st.session_state.user_latent_current, k_local)
-
-        # append trajectory
-        if "trajectory" not in st.session_state or not st.session_state.trajectory:
-            st.session_state.trajectory = []
-        st.session_state.trajectory.append(st.session_state.user_latent_current.copy())
-
-        # store a short payload for UI to display after rerun
-        st.session_state["_last_sim_clicked"] = {
-            "movieId": movie_id,
-            "title": title,
-            "prev_vector": before_vec
-        }
-
-    def _recovery_callback(lr: float, k_local: int):
-        if "user_latent_current" not in st.session_state or st.session_state.user_latent_current is None:
-            return
-        neutral_mask = movie_info_safe["category"] == "neutral"
-        neutral_vec = V_scaled[neutral_mask, :].mean(axis=0) if neutral_mask.any() else V_mean
-        before_vec = st.session_state.user_latent_current.copy()
-        st.session_state.user_latent_current += lr * (neutral_vec - st.session_state.user_latent_current)
-        st.session_state.user_latent_current = pad_truncate(st.session_state.user_latent_current, k_local)
-        if "trajectory" not in st.session_state or not st.session_state.trajectory:
-            st.session_state.trajectory = []
-        st.session_state.trajectory.append(st.session_state.user_latent_current.copy())
-        st.session_state["_last_recovery"] = {"prev_vector": before_vec, "title": "Neutral movie"}
-
-    # ------------------------
-    # 4. Clickable top-10 buttons (ALS-safe with on_click)
+   # ------------------------
+    # 4. Clickable top-10 buttons (ALS-safe)
     # ------------------------
     st.subheader("Click one of the top-10 recommended movies to simulate interaction")
 
     emoji_map = {"neutral": "🟢", "mildly_political": "🟠", "extreme": "🔴"}
     category_colors = {"neutral": "green", "mildly_political": "orange", "extreme": "red"}
 
-    # produce a stable top10 ordering (by pred_rating then movieId)
-    top10_sorted = top10.sort_values(["pred_rating", "movieId"], ascending=[False, True]).head(10).reset_index(drop=True)
+    # --- Sort and merge top-10 predictions ---
+    top10 = pred_df.copy()
+    top10 = top10.sort_values(["pred_rating", "movieId"], ascending=[False, True]).head(10)
+    top10 = top10.merge(movie_info_safe[["movieId","title","category"]], on="movieId", how="left")
 
-    # ensure trajectory exists
+    # --- Initialize trajectory if not present ---
     if "trajectory" not in st.session_state or not st.session_state.trajectory:
         st.session_state.trajectory = [st.session_state.user_latent_current.copy()]
 
-    # layout columns
+    # --- Layout buttons ---
     cols_row1 = st.columns(5)
     cols_row2 = st.columns(5)
 
-    for idx, row in top10_sorted.iterrows():
+    for idx, row in top10.reset_index(drop=True).iterrows():
         emo = emoji_map.get(row.get("category", "neutral"), "⚪")
         title = row.get("title", str(row["movieId"]))
         short_title = title if len(title) <= 35 else title[:32] + "..."
         label = f"{emo} {short_title}"
+        
+        # --- Use movieId as key (ALS-safe) ---
+        key = f"sim_btn_{int(row['movieId'])}"
+        container = cols_row1[idx] if idx < 5 else cols_row2[idx-5]
 
-        # stable key by movieId
-        key = f"sim_btn_movie_{int(row['movieId'])}"
-        container = cols_row1[idx] if idx < 5 else cols_row2[idx - 5]
+        clicked = container.button(label, key=key, help=f"Category: {row.get('category','neutral')}")
+        
+        if clicked:
+            movie_idx = all_movie_ids.index(row["movieId"])
 
-        # attach on_click callback with stable args
-        container.button(
-            label,
-            key=key,
-            help=f"Category: {row.get('category','neutral')}",
-            on_click=_simulate_interaction_callback,
-            args=(int(row["movieId"]), title, float(learning_rate), int(k)),
-        )
+            # --- Update user latent vector ---
+            user_before = st.session_state.user_latent_current.copy()
+            st.session_state.user_latent_current += learning_rate * (V_scaled[movie_idx, :] - st.session_state.user_latent_current)
+            st.session_state.user_latent_current = pad_truncate(st.session_state.user_latent_current, k)
 
-    # show confirmation if callback fired
-    if "_last_sim_clicked" in st.session_state:
-        info = st.session_state["_last_sim_clicked"]
-        st.success(f"Simulated interaction: {info['title']}")
-        # remove so it doesn't repeat across reruns
-        del st.session_state["_last_sim_clicked"]
+            # --- Append to trajectory ---
+            st.session_state.trajectory.append(st.session_state.user_latent_current.copy())
 
-    if "_last_sim_failure" in st.session_state:
-        st.warning(st.session_state["_last_sim_failure"])
-        del st.session_state["_last_sim_failure"]
+            # --- Debug / verification ---
+            st.write(f"Clicked: {title}")
+            st.write("Previous user vector:", user_before)
+            st.write("Updated user vector:", st.session_state.user_latent_current)
+            st.write("Trajectory length:", len(st.session_state.trajectory))
+
+            st.session_state.clicked_movie = row["movieId"]
+            st.success(f"Simulated interaction: {title}")
+
 
     # ------------------------
-    # 5. Recovery Action (use on_click as well)
+    # 5. Recovery Action
     # ------------------------
-    st.button("🎬 Watch a Neutral Movie (Recovery Action)", on_click=_recovery_callback, args=(float(learning_rate), int(k)))
-    if "_last_recovery" in st.session_state:
+    if st.button("🎬 Watch a Neutral Movie (Recovery Action)"):
+        neutral_mask = movie_info_safe["category"] == "neutral"
+        neutral_vec = V_scaled[neutral_mask,:].mean(axis=0) if neutral_mask.any() else V_mean
+        st.session_state.user_latent_current += learning_rate * (neutral_vec - st.session_state.user_latent_current)
+        st.session_state.user_latent_current = pad_truncate(st.session_state.user_latent_current, k)
+        st.session_state.trajectory.append(st.session_state.user_latent_current.copy())
         st.warning("You watched a neutral movie — your preferences shift back toward balance.")
-        del st.session_state["_last_recovery"]
 
     # ------------------------
     # 6. 3D Latent Space Plot (User + Trajectory)
@@ -534,66 +493,47 @@ with tab3:
         if k < 3:
             st.warning("Need at least 3 latent factors for 3D visualization.")
         else:
-            # Normalize scales to make U and V comparable across methods
+            # Normalize scales
             scale_factor = max(np.std(U_scaled), np.std(V_scaled), 1e-8)
             V_norm = V_scaled / scale_factor
-
-            # prepare movie coordinates truncated to 3 dims
-            movie_coords = pad_truncate_2d(V_norm, 3)
-            movie_df_plot = pd.DataFrame(movie_coords, columns=["dim1", "dim2", "dim3"])
-            movie_df_plot["movieId"] = all_movie_ids
-            movie_df_plot = movie_df_plot.merge(movie_info_safe[["movieId", "title", "category"]], on="movieId", how="left")
-
-            # top-10 overlay (preserve order)
-            top10_plot = movie_df_plot[movie_df_plot["movieId"].isin(top10_sorted["movieId"])]
-            top10_plot["order"] = top10_plot["movieId"].map({m: i for i, m in enumerate(top10_sorted["movieId"].tolist())})
-            top10_plot = top10_plot.sort_values("order")
-
-            # trajectory (normalized to same scale)
             traj_norm = np.array([pad_truncate(u, k) for u in st.session_state.trajectory]) / scale_factor
-            traj3 = pad_truncate_2d(traj_norm, 3)
 
-            # center movies so current user is at origin (use current user vector normalized & truncated)
-            user_vec_norm = pad_truncate_2d(st.session_state.user_latent_current.reshape(1, -1), 3)[0] / scale_factor
-            movie_df_plot[["dim1", "dim2", "dim3"]] = center_vectors(movie_df_plot[["dim1", "dim2", "dim3"]].values, user_vec_norm)
-            top10_plot[["dim1", "dim2", "dim3"]] = center_vectors(top10_plot[["dim1", "dim2", "dim3"]].values, user_vec_norm)
-            traj_centered = traj3 - user_vec_norm  # previous positions relative to current user
+            # Movie coordinates
+            movie_coords = pad_truncate_2d(V_norm, 3)
+            movie_df_plot = pd.DataFrame(movie_coords, columns=["dim1","dim2","dim3"])
+            movie_df_plot["movieId"] = all_movie_ids
+            movie_df_plot = movie_df_plot.merge(movie_info_safe[["movieId","title","category"]], on="movieId", how="left")
+
+            # Top-10 movies
+            top10_plot = movie_df_plot[movie_df_plot["movieId"].isin(top10["movieId"])]
+            top10_plot["order"] = top10_plot["movieId"].map({m: i for i,m in enumerate(top10["movieId"].tolist())})
+            top10_plot = top10_plot.sort_values("order")
 
             # Plot
             fig = go.Figure()
             plot_category_scatter(fig, movie_df_plot, category_colors)
             plot_top10_markers(fig, top10_plot, category_colors, size=9)
 
-            # previous user positions (small markers) + line
-            if traj_centered.shape[0] > 1:
+            # User trajectory
+            if traj_norm.shape[0] > 1:
                 fig.add_trace(go.Scatter3d(
-                    x=traj_centered[:, 0],
-                    y=traj_centered[:, 1],
-                    z=traj_centered[:, 2],
+                    x=traj_norm[:,0],
+                    y=traj_norm[:,1],
+                    z=traj_norm[:,2],
                     mode="lines+markers+text",
-                    name="User Trajectory",
                     line=dict(color="blue", width=4),
                     marker=dict(size=6, color="blue"),
-                    text=[f"Step {i}" for i in range(traj_centered.shape[0])],
-                    textposition="bottom center"
+                    text=[f"Step {i}" for i in range(traj_norm.shape[0])],
+                    textposition="bottom center",
+                    name="User Trajectory"
                 ))
 
-            # previous small marker (if there is at least one previous step)
-            if traj_centered.shape[0] > 1:
-                prev = traj_centered[-2]  # penultimate = previous
-                fig.add_trace(go.Scatter3d(
-                    x=[prev[0]], y=[prev[1]], z=[prev[2]],
-                    mode="markers",
-                    name="Previous User",
-                    marker=dict(size=6, color="lightblue", symbol="circle"),
-                    showlegend=True
-                ))
-
-            # big marker for current user at origin
+            # Big sphere for latest user position
+            cur = traj_norm[-1]
             fig.add_trace(go.Scatter3d(
-                x=[0], y=[0], z=[0],
+                x=[cur[0]], y=[cur[1]], z=[cur[2]],
                 mode="markers+text",
-                name=f"User {selected_user}",
+                name=f"Current User",
                 marker=dict(size=10, color="blue", symbol="circle"),
                 text=[f"User {selected_user}"],
                 textposition="top center"
@@ -602,10 +542,12 @@ with tab3:
             fig.update_layout(
                 title=f"3D Latent Space – {method} (k={k}) [User-Centered]",
                 scene=dict(xaxis_title="Latent Dim 1", yaxis_title="Latent Dim 2", zaxis_title="Latent Dim 3"),
-                height=750, legend=dict(x=0.02, y=0.98)
+                height=750,
+                legend=dict(x=0.02, y=0.98)
             )
 
             st.plotly_chart(fig, use_container_width=True)
+
 
     # ------------------------
     # 7. Enhanced UMAP Projection
@@ -625,18 +567,17 @@ with tab3:
                 V_umap_input = normalize_rows(V_scaled - V_mean_stored)
                 movie_coords_umap = umap_model.transform(V_umap_input)
 
-            movie_umap_df = pd.DataFrame(movie_coords_umap, columns=["dim1", "dim2", "dim3"])
+            movie_umap_df = pd.DataFrame(movie_coords_umap, columns=["dim1","dim2","dim3"])
             movie_umap_df["movieId"] = all_movie_ids
-            movie_umap_df = movie_umap_df.merge(movie_info_safe[["movieId", "title", "category"]], on="movieId", how="left")
+            movie_umap_df = movie_umap_df.merge(movie_info_safe[["movieId","title","category"]], on="movieId", how="left")
 
             traj_umap = normalize_rows(prepare_trajectory(st.session_state.trajectory, k, V_mean) - st.session_state[umap_key]["V_mean"])
-            user_umap_df = pd.DataFrame(umap_model.transform(traj_umap), columns=["dim1", "dim2", "dim3"])
+            user_umap_df = pd.DataFrame(umap_model.transform(traj_umap), columns=["dim1","dim2","dim3"])
             user_umap_df["step"] = np.arange(len(user_umap_df))
 
             fig_umap = go.Figure()
             plot_category_scatter(fig_umap, movie_umap_df, category_colors)
-            plot_top10_markers(fig_umap, movie_umap_df[movie_umap_df["movieId"].isin(top10_sorted["movieId"])], category_colors, size=9)
-
+            plot_top10_markers(fig_umap, movie_umap_df[movie_umap_df["movieId"].isin(top10["movieId"])], category_colors, size=9)
             if len(user_umap_df) > 1:
                 fig_umap.add_trace(go.Scatter3d(
                     x=user_umap_df["dim1"], y=user_umap_df["dim2"], z=user_umap_df["dim3"],
@@ -647,8 +588,6 @@ with tab3:
                     text=[f"Step {i}" for i in user_umap_df["step"]],
                     textposition="bottom center"
                 ))
-
-            # current user (UMAP)
             cur = user_umap_df.iloc[-1]
             fig_umap.add_trace(go.Scatter3d(
                 x=[cur["dim1"]], y=[cur["dim2"]], z=[cur["dim3"]],
@@ -657,7 +596,6 @@ with tab3:
                 marker=dict(size=10, color="blue", symbol="circle"),
                 text=[f"User {selected_user}"], textposition="top center"
             ))
-
             fig_umap.update_layout(
                 title="Enhanced UMAP Projection (Cosine distance): Content Clusters + User Drift",
                 scene=dict(xaxis_title="UMAP Dim 1", yaxis_title="UMAP Dim 2", zaxis_title="UMAP Dim 3"),
@@ -667,71 +605,77 @@ with tab3:
         except Exception as e:
             st.warning(f"UMAP projection skipped: {e}")
 
-    col1, col2 = st.columns(2)
+    # ------------------------
+    # 8. Radicalization Index
+    # ------------------------
+    rad_idx = float((top10["category"] == "extreme").mean())
+    delta_val = rad_idx - st.session_state.prev_rad_idx
+    st.metric("Radicalization Index", f"{rad_idx*100:.1f}%", delta=f"{delta_val*100:+.1f}%")
+    st.session_state.prev_rad_idx = rad_idx
 
-    with col1:
-        # ------------------------
-        # 8. Radicalization Index and Category Distribution
-        # ------------------------
-        if "category" not in top10.columns:
-            top10["category"] = "neutral"
-        rad_idx = float((top10["category"] == "extreme").mean())
-        delta_val = rad_idx - st.session_state.get("prev_rad_idx", 0.0)
-        st.metric("Radicalization Index", f"{rad_idx*100:.1f}%", delta=f"{delta_val*100:+.1f}%")
-        st.session_state.prev_rad_idx = rad_idx
+    # ------------------------
+    # 9. Category distribution chart
+    # ------------------------
+    cat_counts = top10["category"].value_counts().reindex(["neutral","mildly_political","extreme"], fill_value=0)
+    cat_chart = px.bar(
+        x=cat_counts.index, y=cat_counts.values,
+        labels={"x":"Category","y":"Count"},
+        title="Distribution of Top-10 Recommendations",
+        color=cat_counts.index,
+        color_discrete_map=category_colors
+    )
+    st.plotly_chart(cat_chart, use_container_width=True)
 
-        cat_counts = top10["category"].value_counts().reindex(["neutral", "mildly_political", "extreme"], fill_value=0)
-        cat_chart = px.bar(
-            x=cat_counts.index, y=cat_counts.values,
-            labels={"x": "Category", "y": "Count"},
-            title="Distribution of Top-10 Recommendations",
-            color=cat_counts.index,
-            color_discrete_map=category_colors
+    # ------------------------
+    # 10. Category-Biased KNN Graph (Top-10 Highlight + User Drift)
+    # ------------------------
+    st.subheader("Category-Biased KNN Graph (Top-10 Highlight + User Drift)")
+
+    try:
+        # --- Normalize scales to match 3D latent plot ---
+        scale_factor = max(np.std(U_scaled), np.std(V_scaled), 1e-8)
+        U_norm = U_scaled / scale_factor
+        V_norm = V_scaled / scale_factor
+        user_vec_norm = pad_truncate_2d(st.session_state.user_latent_current.reshape(1, -1), 3)[0]
+
+        # --- Movie coordinates (3D) ---
+        movie_coords_knn = pad_truncate_2d(V_norm, 3)
+        movie_coords_knn_centered = center_vectors(movie_coords_knn, user_vec_norm)
+
+        movie_umap_df_knn = pd.DataFrame(movie_coords_knn_centered, columns=["dim1","dim2","dim3"])
+        movie_umap_df_knn["movieId"] = all_movie_ids
+        movie_umap_df_knn = movie_umap_df_knn.merge(
+            movie_info_safe[["movieId","title","category"]],
+            on="movieId",
+            how="left"
         )
-        st.plotly_chart(cat_chart, use_container_width=True)
 
-    with col2: 
+        # --- Top-10 movies subset ---
+        top10_knn = movie_umap_df_knn[movie_umap_df_knn["movieId"].isin(top10["movieId"])].copy()
+        top10_knn["order"] = top10_knn["movieId"].map({m:i for i,m in enumerate(top10["movieId"].tolist())})
+        top10_knn = top10_knn.sort_values("order")
 
-        # ------------------------
-        # 9. Category-Biased KNN Graph (Cluster Representation)
-        # ------------------------
-        st.subheader("Category-Biased KNN Graph (Top-10 Highlight + User Drift)")
-        try:
-            # movie coords centered on user, normalized to same scale
-            scale_factor = max(np.std(U_scaled), np.std(V_scaled), 1e-8)
-            V_norm = V_scaled / scale_factor
-            user_vec_norm = pad_truncate_2d(st.session_state.user_latent_current.reshape(1, -1), 3)[0] / scale_factor
-            movie_coords_knn = pad_truncate_2d(V_norm, 3)
-            movie_coords_knn_centered = center_vectors(movie_coords_knn, user_vec_norm)
+        # --- User trajectory (centered and normalized) ---
+        traj_norm = np.array([pad_truncate(u, k) for u in st.session_state.trajectory]) / scale_factor
+        traj_knn_3d = pad_truncate_2d(traj_norm, 3)
+        traj_knn_centered = traj_knn_3d - user_vec_norm
 
-            movie_umap_df_knn = pd.DataFrame(movie_coords_knn_centered, columns=["dim1", "dim2", "dim3"])
-            movie_umap_df_knn["movieId"] = all_movie_ids
-            movie_umap_df_knn = movie_umap_df_knn.merge(movie_info_safe[["movieId", "title", "category"]], on="movieId", how="left")
+        user_umap_df_knn = pd.DataFrame(traj_knn_centered, columns=["dim1","dim2","dim3"])
+        user_umap_df_knn["step"] = np.arange(len(user_umap_df_knn))
 
-            top10_knn = movie_umap_df_knn[movie_umap_df_knn["movieId"].isin(top10_sorted["movieId"])].copy()
-            top10_knn["order"] = top10_knn["movieId"].map({m: i for i, m in enumerate(top10_sorted["movieId"].tolist())})
-            top10_knn = top10_knn.sort_values("order")
+        # --- Plot KNN graph ---
+        fig_knn = plot_category_biased_knn_graph(
+            movie_umap_df=movie_umap_df_knn,
+            user_umap_df=user_umap_df_knn,
+            top10=top10_knn,
+            category_colors=category_colors
+        )
 
-            traj_norm = np.array([pad_truncate(u, k) for u in st.session_state.trajectory]) / scale_factor
-            traj_knn_3d = pad_truncate_2d(traj_norm, 3)
-            # --- Amplify user trajectory ONLY for visualization in the KNN graph ---
-            TRAJECTORY_VISUAL_SCALE = 10.0   # Increase until visually clear (try 5–15)
+        st.plotly_chart(fig_knn, use_container_width=True)
 
-            traj_knn_centered = (traj_knn_3d - user_vec_norm) * TRAJECTORY_VISUAL_SCALE
-            user_umap_df_knn = pd.DataFrame(traj_knn_centered, columns=["dim1", "dim2", "dim3"])
-            user_umap_df_knn["step"] = np.arange(len(user_umap_df_knn))
+    except Exception as e:
+        st.warning(f"Category-biased graph skipped: {e}")
 
-            # call the plotting helper (returns a figure)
-            fig_knn = plot_category_biased_knn_graph(
-                movie_umap_df=movie_umap_df_knn,
-                user_umap_df=user_umap_df_knn,
-                top10=top10_knn,
-                category_colors=category_colors
-            )
-
-            st.plotly_chart(fig_knn, use_container_width=True)
-        except Exception as e:
-            st.warning(f"Category-biased graph skipped: {e}")
 
 
 

@@ -12,12 +12,12 @@ import scipy.sparse as sp
 import networkx as nx
 from sklearn.metrics.pairwise import cosine_similarity
 
-from helpers.helpers_tab1 import get_category_mapping_df, plot_category_distribution
+from helpers.helpers_tab1 import get_category_mapping_df, plot_category_distribution, plot_user_political_extremeness
 
 from helpers.helpers_tab2 import (
     build_rating_matrices,
     run_svd, run_als, run_pmf,
-    plot_top20_category_bar,
+    plot_top10_category_bar,
     plot_latent_3d,
 )
 
@@ -30,7 +30,7 @@ from helpers.helpers_tab3_latent_drift import latent_drift_simulation
 from helpers.helpers_tab3_trajectory import (pad_truncate, pad_truncate_2d, center_vectors, normalize_rows, prepare_trajectory )
 from helpers.helpers_tab3_trajectory import (prepare_user_trajectory, plot_top10_markers, plot_category_scatter)
 
-from helpers.helpers_tab3_knn import plot_category_biased_knn_graph
+from helpers.helpers_tab3_knn import plot_category_biased_knn_graph, plot_user_political_extremeness_tab3
 
 
 # Optional: ALS
@@ -68,18 +68,21 @@ st.sidebar.header("Global Parameters:")
 # Select subset size
 n_users = st.sidebar.slider(
     "Number of users to include",
-    5, len(merged_df['userId'].unique()), 50
+    5, len(merged_df['userId'].unique()), 100
 )
 n_movies = st.sidebar.slider(
     "Number of movies to include",
-    10, len(merged_df['movieId'].unique()), 200
+    10, len(merged_df['movieId'].unique()), 300
 )
 
-# Select user and method
+## Select user and method
+user_options = sorted(merged_df['userId'].unique()[:n_users])
+
 selected_user = st.sidebar.selectbox(
     "Select user for recommendations / simulation",
-    merged_df['userId'].unique()[:n_users]
+    user_options
 )
+
 
 method = st.sidebar.selectbox(
     "Recommendation Method / Latent Model",
@@ -207,9 +210,19 @@ with tab1:
     R_display_clean = R_full.replace(0, np.nan)
     st.dataframe(R_display_clean)
 
+    # Tab1: User Political Extremeness from actual ratings
+    fig_tab1 = plot_user_political_extremeness(
+        df_display=df_display,           # actual ratings
+        selected_user=selected_user,
+        title="User Political Extremeness (Actual Ratings)"
+    )
+    st.plotly_chart(fig_tab1, use_container_width=True, key=f"user_extremeness_tab1_{selected_user}")
+
+
+
 
 # -------------------------------------------------------
-# Tab 1: Matrix Factorization and Latent Space Exploration
+# Tab 2: Matrix Factorization and Latent Space Exploration
 # --------------------------------------------------------
 with tab2:
 
@@ -315,10 +328,10 @@ with tab2:
 
         # Sort by predicted rating descending
         user_pred_sorted = user_pred_df.sort_values("predicted_rating", ascending=False)
-        st.dataframe(user_pred_sorted.head(20))
+        st.dataframe(user_pred_sorted.head(10))
 
     with col2:
-        st.subheader("Category Distribution (Top 20 Recommendations)")
+        st.subheader("Category Distribution (Top 10 Recommendations)")
 
         # Color coding
         color_map = {
@@ -327,18 +340,18 @@ with tab2:
             "extreme": "red"
         }
 
-        # Take the top 20 recommended movies
-        top20 = user_pred_sorted.head(20)
+        # Take the top 10 recommended movies
+        top10 = user_pred_sorted.head(10)
 
-        # Count categories in top 20
-        cat_counts_top20 = (
-            top20["category"]
+        # Count categories in top 10
+        cat_counts_top10 = (
+            top10["category"]
             .value_counts()
             .reset_index()
         )
-        cat_counts_top20.columns = ["category", "count"]
+        cat_counts_top10.columns = ["category", "count"]
 
-        plot_top20_category_bar(cat_counts_top20, selected_user)
+        plot_top10_category_bar(cat_counts_top10, selected_user)
 
 
     # ------------------------
@@ -350,6 +363,31 @@ with tab2:
         movies_idx, movie_info_reset,
         user_pred_sorted, method, latent_factors, selected_user
     )
+
+   # Convert predicted ratings to long-form DataFrame
+    pred_df_full = pd.DataFrame(pred_ratings, index=users_idx, columns=movies_idx)
+    pred_df_full.index.name = "userId"
+    pred_df_full = pred_df_full.reset_index().melt(id_vars="userId", var_name="movieId", value_name="rating")
+
+    # Merge category info
+    pred_df_full = pred_df_full.merge(
+        movie_info_reset[["movieId", "category"]],
+        on="movieId",
+        how="left"
+    )
+
+    # Plot predicted extremeness
+    fig_tab2 = plot_user_political_extremeness(
+        df_display=pred_df_full,        # predicted ratings
+        selected_user=selected_user,
+        title=f"Predicted Ratings: User Political Extremeness ({method})"
+    )
+
+    st.plotly_chart(fig_tab2, use_container_width=True, key=f"user_extremeness_tab2_{method}_{selected_user}")
+
+
+
+
 
 
 # ------------------------
@@ -696,42 +734,126 @@ with tab3:
         # 9. Category-Biased KNN Graph (Cluster Representation)
         # ------------------------
         st.subheader("Category-Biased KNN Graph (Top-10 Highlight + User Drift)")
+
         try:
-            # movie coords centered on user, normalized to same scale
-            scale_factor = max(np.std(U_scaled), np.std(V_scaled), 1e-8)
-            V_norm = V_scaled / scale_factor
-            user_vec_norm = pad_truncate_2d(st.session_state.user_latent_current.reshape(1, -1), 3)[0] / scale_factor
-            movie_coords_knn = pad_truncate_2d(V_norm, 3)
-            movie_coords_knn_centered = center_vectors(movie_coords_knn, user_vec_norm)
+            # --------------------------------------------------
+            # IMPORTANT: KNN GRAPH USES A CLUSTER-FIRST FRAME
+            # - NO user-centering of movies
+            # - NO global variance normalization
+            # - Spring layout defines geometry
+            # --------------------------------------------------
 
-            movie_umap_df_knn = pd.DataFrame(movie_coords_knn_centered, columns=["dim1", "dim2", "dim3"])
+            # --- Movie coordinates (cluster-first, NOT user-centered) ---
+            movie_coords_knn = pad_truncate_2d(V_scaled, 3)
+
+            movie_umap_df_knn = pd.DataFrame(
+                movie_coords_knn,
+                columns=["dim1", "dim2", "dim3"]
+            )
             movie_umap_df_knn["movieId"] = all_movie_ids
-            movie_umap_df_knn = movie_umap_df_knn.merge(movie_info_safe[["movieId", "title", "category"]], on="movieId", how="left")
+            movie_umap_df_knn = movie_umap_df_knn.merge(
+                movie_info_safe[["movieId", "title", "category"]],
+                on="movieId",
+                how="left"
+            )
 
-            top10_knn = movie_umap_df_knn[movie_umap_df_knn["movieId"].isin(top10_sorted["movieId"])].copy()
-            top10_knn["order"] = top10_knn["movieId"].map({m: i for i, m in enumerate(top10_sorted["movieId"].tolist())})
+            # --- Top-10 subset (stable order preserved) ---
+            top10_knn = movie_umap_df_knn[
+                movie_umap_df_knn["movieId"].isin(top10_sorted["movieId"])
+            ].copy()
+
+            top10_knn["order"] = top10_knn["movieId"].map(
+                {m: i for i, m in enumerate(top10_sorted["movieId"].tolist())}
+            )
             top10_knn = top10_knn.sort_values("order")
 
-            traj_norm = np.array([pad_truncate(u, k) for u in st.session_state.trajectory]) / scale_factor
-            traj_knn_3d = pad_truncate_2d(traj_norm, 3)
-            # --- Amplify user trajectory ONLY for visualization in the KNN graph ---
-            TRAJECTORY_VISUAL_SCALE = 10.0   # Increase until visually clear (try 5–15)
+            # --------------------------------------------------
+            # User trajectory (visual exaggeration only)
+            # --------------------------------------------------
+            traj_knn = np.array([pad_truncate(u, k) for u in st.session_state.trajectory])
+            traj_knn_3d = pad_truncate_2d(traj_knn, 3)
 
-            traj_knn_centered = (traj_knn_3d - user_vec_norm) * TRAJECTORY_VISUAL_SCALE
-            user_umap_df_knn = pd.DataFrame(traj_knn_centered, columns=["dim1", "dim2", "dim3"])
+            # Exaggerate trajectory so drift is visible
+            TRAJECTORY_VISUAL_SCALE = 8.0  # safe range: 5–12
+            # express trajectory as offsets from starting point
+            traj_offsets = traj_knn_3d - traj_knn_3d[0]
+
+            # exaggerate offsets only
+            traj_knn_3d = traj_offsets * TRAJECTORY_VISUAL_SCALE
+
+            user_umap_df_knn = pd.DataFrame(
+                traj_knn_3d,
+                columns=["dim1", "dim2", "dim3"]
+            )
             user_umap_df_knn["step"] = np.arange(len(user_umap_df_knn))
 
-            # call the plotting helper (returns a figure)
+            # --------------------------------------------------
+            # Render KNN graph (spring layout defines clusters)
+            # --------------------------------------------------
             fig_knn = plot_category_biased_knn_graph(
                 movie_umap_df=movie_umap_df_knn,
                 user_umap_df=user_umap_df_knn,
                 top10=top10_knn,
-                category_colors=category_colors
+                category_colors=category_colors,
+
+                # --- Stronger defaults for demonstration ---
+                K=6,
+                bias_strength=1.3,
+                exaggeration=1.15,
+                drift_strength=0.4,
+                spring_scale=6.0,
+                spring_k=0.25
             )
 
             st.plotly_chart(fig_knn, use_container_width=True)
+
         except Exception as e:
             st.warning(f"Category-biased graph skipped: {e}")
 
+    # ------------------------
+    # Political Extremeness Plot (Predicted / Current User, Top-10 Only)
+    # ------------------------
 
+    # 1. Prepare top-10 IDs for the current user
+    top10_sorted = top10.sort_values(["pred_rating", "movieId"], ascending=[False, True]).head(10).reset_index(drop=True)
+    top10_ids = top10_sorted["movieId"].tolist()
 
+    # 2. Prepare static data for other users (compute once)
+    if "all_users_static_top10" not in st.session_state:
+        # Filter original ratings to top-10 movies only
+        df_static_top10 = df_display[df_display["movieId"].isin(top10_ids)].copy()
+        
+        # Ensure all categories exist
+        if "category" not in df_static_top10.columns:
+            df_static_top10["category"] = "neutral"
+        
+        st.session_state.all_users_static_top10 = df_static_top10
+    else:
+        df_static_top10 = st.session_state.all_users_static_top10
+
+    # 3. Prepare predicted ratings for selected user (top-10 only)
+    pred_user_top10 = pred_user_ratings[[all_movie_ids.index(m) for m in top10_ids]]
+    df_selected_user_top10 = pd.DataFrame({
+        "userId": selected_user,
+        "movieId": top10_ids,
+        "rating": pred_user_top10
+    }).merge(movie_info_safe[["movieId", "category"]], on="movieId", how="left")
+
+    # 4. Merge static users + selected user
+    df_all_pred_top10 = pd.concat(
+        [df_static_top10, df_selected_user_top10],
+        ignore_index=True
+    )
+
+    # 5. Plot extremeness (2D scatter)
+    fig_extremeness = plot_user_political_extremeness_tab3(
+        df_display=df_all_pred_top10,
+        selected_user=selected_user,
+        title=f"User Political Extremeness (Top-10) – Step {len(st.session_state.trajectory)}"
+    )
+
+    st.plotly_chart(
+        fig_extremeness,
+        use_container_width=True,
+        key=f"user_extremeness_top10_tab3_{method}_{selected_user}_{len(st.session_state.trajectory)}"
+    )
