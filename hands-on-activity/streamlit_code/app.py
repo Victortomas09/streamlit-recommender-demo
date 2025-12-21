@@ -43,13 +43,13 @@ except:
 # ------------------------
 # Load Data (once globally)
 # ------------------------
-original_df = pd.read_csv("merged_movielens.csv")
+original_df = pd.read_csv("hands-on-activity/streamlit_code/merged_movielens.csv")
 
-merged_df = pd.read_csv("movielens_100k_categories.csv")
+merged_df = pd.read_csv("hands-on-activity/streamlit_code/movielens_100k_categories.csv")
 merged_df.columns = merged_df.columns.str.strip()
 
 user_cols = ["userId", "age", "gender", "occupation", "zip_code"]
-users = pd.read_csv("../data/ml-100k/u.user", sep="|", names=user_cols, encoding="latin-1")
+users = pd.read_csv("hands-on-activity/data/ml-100k/u.user", sep="|", names=user_cols, encoding="latin-1")
 users = users.drop(columns=["zip_code"])
 users.columns = users.columns.str.strip()
 
