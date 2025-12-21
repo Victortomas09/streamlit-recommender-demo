@@ -43,7 +43,7 @@ except:
 # ------------------------
 # Load Data (once globally)
 # ------------------------
-original_df = pd.read_csv("hands-on-activity/data/merged_movielens.csv")
+original_df = pd.read_csv("hands-on-activity/streamlit_code/merged_movielens.csv")
 
 merged_df = pd.read_csv("hands-on-activity/streamlit_code/movielens_100k_categories.csv")
 merged_df.columns = merged_df.columns.str.strip()
