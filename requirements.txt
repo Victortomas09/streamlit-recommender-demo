@@ -5,5 +5,4 @@ scikit-learn
 matplotlib
 plotly
 scipy
-implicit
 umap-learn
