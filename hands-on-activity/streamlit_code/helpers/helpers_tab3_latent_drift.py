@@ -7,7 +7,6 @@ import networkx as nx
 from sklearn.metrics.pairwise import cosine_similarity
 from umap import UMAP
 from scipy.sparse import spmatrix, csr_matrix
-from implicit.als import AlternatingLeastSquares
 from sklearn.decomposition import NMF
 from scipy.linalg import svd
 

@@ -74,41 +74,40 @@ def plot_category_distribution(cat_counts_full, cat_counts_filtered, color_map):
         st.plotly_chart(fig_filtered, use_container_width=True)
 
 
-
-
-
-
 def plot_user_political_extremeness(
     df_display,
     selected_user=None,
-    title="User Political Extremeness vs Average Rating Mass",
+    title="User Political Extremeness vs Average Rating",
     use_predicted=False
 ):
     """
     Plots users in 2D:
     - X: rating-weighted political extremeness in [0,1]
-    - Y: average rating mass
+    - Y: average rating (true mean, clipped if predicted)
     - Highlights a selected user if provided
-
-    Parameters
-    ----------
-    df_display : pd.DataFrame
-        Must contain columns: userId, category, rating
-        If use_predicted=True, 'rating' should be predicted rating
-    selected_user : optional
-        userId to highlight
-    title : str
-        Plot title
-    use_predicted : bool
-        Whether the ratings are predicted (SVD/ALS/PMF) or actual
-
-    Returns
-    -------
-    fig : plotly.graph_objects.Figure
     """
 
+    categories = ['neutral', 'mildly_political', 'extreme']
+
     # ----------------------------
-    # 1. Compute rating-weighted profiles
+    # 0. Prepare data (plot-only)
+    # ----------------------------
+    df_display = df_display.copy()
+
+    if use_predicted:
+        df_display["rating"] = df_display["rating"].clip(1, 5)
+
+    # ----------------------------
+    # 1. True per-user average rating
+    # ----------------------------
+    user_avg_rating = (
+        df_display
+        .groupby("userId", as_index=True)["rating"]
+        .mean()
+    )
+
+    # ----------------------------
+    # 2. Rating-weighted category profiles
     # ----------------------------
     user_cat = df_display.pivot_table(
         index="userId",
@@ -118,43 +117,54 @@ def plot_user_political_extremeness(
         fill_value=0
     )
 
-    rating_counts = df_display.groupby("userId")["rating"].count()
-    user_cat["avg_rating_mass"] = user_cat.sum(axis=1) / rating_counts
+    # Ensure all categories exist
+    for cat in categories:
+        if cat not in user_cat.columns:
+            user_cat[cat] = 0
 
-    # Center ratings per user to avoid compression across users
-    user_cat_centered = user_cat[['neutral', 'mildly_political', 'extreme']].sub(
-        user_cat[['neutral', 'mildly_political', 'extreme']].mean(axis=1),
+    # Attach correct average rating
+    user_cat["avg_rating"] = user_avg_rating
+
+    # ----------------------------
+    # 3. Center ratings per user
+    # ----------------------------
+    user_cat_centered = user_cat[categories].sub(
+        user_cat[categories].mean(axis=1),
         axis=0
     )
 
-    # Extremeness score relative to user's own rating pattern
+    # Extremeness score relative to user's own pattern
     user_cat["extremeness"] = (
-        user_cat_centered["extreme"] + 0.5 * user_cat_centered["mildly_political"]
-    ).div(user_cat_centered.abs().sum(axis=1) + 1e-8)  # avoid div0
-    # scale to [0,1]
-    user_cat["extremeness"] = (user_cat["extremeness"] - user_cat["extremeness"].min()) / (
+        user_cat_centered["extreme"]
+        + 0.5 * user_cat_centered["mildly_political"]
+    ).div(user_cat_centered.abs().sum(axis=1) + 1e-8)
+
+    # Scale extremeness to [0,1]
+    user_cat["extremeness"] = (
+        user_cat["extremeness"] - user_cat["extremeness"].min()
+    ) / (
         user_cat["extremeness"].max() - user_cat["extremeness"].min() + 1e-8
     )
 
     # ----------------------------
-    # 2. Base scatter
+    # 4. Base scatter
     # ----------------------------
     fig = px.scatter(
         user_cat,
         x="extremeness",
-        y="avg_rating_mass",
+        y="avg_rating",
         hover_name=user_cat.index.astype(str),
         title=title,
         labels={
             "extremeness": "Extremeness (Rating-Weighted)",
-            "avg_rating_mass": "Average Rating"
+            "avg_rating": "Average Rating"
         }
     )
 
     fig.update_traces(marker=dict(size=7, opacity=0.65), showlegend=False)
 
     # ----------------------------
-    # 3. X-axis segmentation: Neutral / Mild / Extreme
+    # 5. X-axis segmentation
     # ----------------------------
     fig.update_xaxes(
         range=[0, 1],
@@ -171,14 +181,14 @@ def plot_user_political_extremeness(
     fig.add_vline(x=0.66, line_dash="dash", line_color="red")
 
     # ----------------------------
-    # 4. Highlight selected user
+    # 6. Highlight selected user
     # ----------------------------
     if selected_user is not None and selected_user in user_cat.index:
         u = user_cat.loc[selected_user]
 
         fig.add_trace(go.Scatter(
             x=[u["extremeness"]],
-            y=[u["avg_rating_mass"]],
+            y=[u["avg_rating"]],
             mode="markers+text",
             name=f"User {selected_user}",
             marker=dict(
